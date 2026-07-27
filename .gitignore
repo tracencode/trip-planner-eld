@@ -11,8 +11,8 @@ dist/
 staticfiles/
 *.sqlite3
 
-# ensure local secrets/venv stay out
-backend/.env
-frontend/.env
-backend/.venv/
+# Extra
 backend/media/logs/*.png
+backend/staticfiles/
+*.sqlite3
+.vercel/
