@@ -1,13 +1,9 @@
 """
-Generate daily driver log sheets by drawing on the blank FMCSA-style form.
+Generate Drivers Daily Log sheets by drawing an FMCSA-style template from scratch.
 
-Uses trips/assets/blank_log.png as the template and overlays:
-- date / from / to
-- total miles
-- duty-status graph lines (Off Duty / Sleeper / Driving / On Duty)
-- total hours per status
-- remarks
-- simple 70hr/8day recap values
+Creates a form similar to the official blank paper log (header, duty grid with
+15-minute ticks, remarks, shipping docs, and 70hr/8day recap), then fills it
+with trip schedule data.
 """
 from __future__ import annotations
 
@@ -21,52 +17,47 @@ from django.conf import settings
 from PIL import Image, ImageDraw, ImageFont
 
 
-# --- Template geometry (base blank is 513×518; we scale up for clarity) ---
-BLANK_PATH = Path(__file__).resolve().parent.parent / "assets" / "blank_log.png"
-SCALE = 3
+WIDTH = 1700
+HEIGHT = 2200
+MARGIN = 48
+INK = (20, 20, 20)
+GRID = (40, 40, 40)
+LIGHT = (120, 120, 120)
+FILL_BLUE = (20, 55, 140)
+WHITE = (255, 255, 255)
+HEADER_BG = (15, 15, 15)
 
-# Coordinates are in *base* (1×) pixels; multiplied by SCALE when drawing.
-GRAPH_LEFT = 97.0
-GRAPH_RIGHT = 445.0
-HOURS = 24
-
-# Horizontal separators of the 4 duty rows (from calibration)
-ROW_BOUNDS = [184.0, 201.0, 218.0, 235.0, 252.0]
-STATUS_ROWS = {
-    "off_duty": 0,
-    "sleeper": 1,
-    "driving": 2,
-    "on_duty": 3,
-}
-
-
-def _s(v: float) -> int:
-    return int(round(v * SCALE))
+STATUS_ORDER = [
+    ("off_duty", "1. Off Duty"),
+    ("sleeper", "2. Sleeper Berth"),
+    ("driving", "3. Driving"),
+    ("on_duty", "4. On Duty (not driving)"),
+]
 
 
-def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    size = max(10, int(size * SCALE / 2.2))
-    for name in (
-        "/System/Library/Fonts/Supplemental/Courier New.ttf",
-        "/System/Library/Fonts/Courier.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
+def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = (
+        (
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+            if bold
+            else "/System/Library/Fonts/Supplemental/Arial.ttf"
+        ),
+        (
+            "/System/Library/Fonts/Helvetica.ttc"
+        ),
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            if bold
+            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        ),
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    )
+    for name in candidates:
         try:
             return ImageFont.truetype(name, size)
         except OSError:
             continue
     return ImageFont.load_default()
-
-
-def _hour_x(hour: float) -> float:
-    return GRAPH_LEFT + (hour / HOURS) * (GRAPH_RIGHT - GRAPH_LEFT)
-
-
-def _row_y(status: str) -> float:
-    idx = STATUS_ROWS.get(status, 0)
-    return (ROW_BOUNDS[idx] + ROW_BOUNDS[idx + 1]) / 2.0
 
 
 def _parse_events_by_day(schedule: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
@@ -117,7 +108,6 @@ def _day_totals(day_events: list[dict[str, Any]]) -> dict[str, float]:
         status = e.get("status")
         if status in hours:
             hours[status] += dur
-    # Remaining time in the calendar day is off-duty for the sheet total
     accounted = sum(hours.values())
     if accounted < 24:
         hours["off_duty"] += 24 - accounted
@@ -146,19 +136,16 @@ def _remarks(day_events: list[dict[str, Any]]) -> list[str]:
             "cycle_warning",
             "end",
         ):
-            lines.append(f"{e['time']} {e['description']}")
-    return lines[:10]
+            lines.append(f"{e['time']} — {e['description']}")
+    return lines[:12]
 
 
-def _load_blank() -> Image.Image:
-    if not BLANK_PATH.exists():
-        raise FileNotFoundError(f"Blank log template missing: {BLANK_PATH}")
-    base = Image.open(BLANK_PATH).convert("RGBA")
-    # Upscale for sharper handwriting-style overlays
-    return base.resize(
-        (base.width * SCALE, base.height * SCALE),
-        Image.Resampling.LANCZOS,
-    )
+def _box(draw: ImageDraw.ImageDraw, xy: tuple[int, int, int, int], width: int = 2) -> None:
+    draw.rectangle(xy, outline=INK, width=width)
+
+
+def _hline(draw: ImageDraw.ImageDraw, x1: int, x2: int, y: int, width: int = 1, fill=INK) -> None:
+    draw.line([(x1, y), (x2, y)], fill=fill, width=width)
 
 
 def draw_log_sheet(
@@ -172,65 +159,202 @@ def draw_log_sheet(
     cycle_used: float = 0.0,
     cycle_remaining: float = 70.0,
 ) -> Image.Image:
-    img = _load_blank()
+    img = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
     draw = ImageDraw.Draw(img)
 
-    ink = (15, 40, 120)  # blue pen look
-    ink_dark = (20, 20, 20)
-    font_sm = _font(11)
-    font_md = _font(13)
-    font_lg = _font(15)
+    title_f = _font(36, bold=True)
+    h1 = _font(18, bold=True)
+    body = _font(15)
+    small = _font(12)
+    tiny = _font(11)
+    fill_f = _font(17, bold=True)
 
-    # --- Header fields ---
+    left = MARGIN
+    right = WIDTH - MARGIN
+    y = MARGIN
+
+    # Outer page border
+    _box(draw, (MARGIN - 8, MARGIN - 8, WIDTH - MARGIN + 8, HEIGHT - MARGIN + 8), 3)
+
+    # --- Title row ---
+    draw.text((left, y), "Drivers Daily Log (24 hours)", fill=INK, font=title_f)
+
     try:
         dt = datetime.strptime(day_date, "%Y-%m-%d")
         month, day_n, year = f"{dt.month:02d}", f"{dt.day:02d}", str(dt.year)
     except ValueError:
         month, day_n, year = "", "", day_date
 
-    # Date: month / day / year (top right area of form)
-    draw.text((_s(268), _s(36)), month, fill=ink, font=font_md)
-    draw.text((_s(312), _s(36)), day_n, fill=ink, font=font_md)
-    draw.text((_s(350), _s(36)), year, fill=ink, font=font_md)
+    date_x = 760
+    draw.text((date_x, y + 8), "(month)", fill=LIGHT, font=tiny)
+    draw.text((date_x + 90, y + 8), "(day)", fill=LIGHT, font=tiny)
+    draw.text((date_x + 160, y + 8), "(year)", fill=LIGHT, font=tiny)
+    _hline(draw, date_x, date_x + 70, y + 42, 1)
+    _hline(draw, date_x + 85, date_x + 145, y + 42, 1)
+    _hline(draw, date_x + 160, date_x + 250, y + 42, 1)
+    draw.text((date_x + 18, y + 18), month, fill=FILL_BLUE, font=fill_f)
+    draw.text((date_x + 100, y + 18), day_n, fill=FILL_BLUE, font=fill_f)
+    draw.text((date_x + 175, y + 18), year, fill=FILL_BLUE, font=fill_f)
+    draw.text((date_x + 72, y + 22), "/", fill=INK, font=body)
+    draw.text((date_x + 148, y + 22), "/", fill=INK, font=body)
 
+    draw.text(
+        (1150, y + 4),
+        "Original — File at home terminal.\nDuplicate — Driver retains in his/her\npossession for 8 days.",
+        fill=INK,
+        font=tiny,
+    )
+
+    y += 70
     # From / To
-    draw.text((_s(55), _s(58)), (from_location or "")[:42], fill=ink, font=font_sm)
-    draw.text((_s(55), _s(74)), (to_location or "")[:42], fill=ink, font=font_sm)
+    draw.text((left, y), "From:", fill=INK, font=body)
+    _hline(draw, left + 70, right, y + 18, 1)
+    draw.text((left + 80, y - 2), (from_location or "")[:70], fill=FILL_BLUE, font=fill_f)
+    y += 36
+    draw.text((left, y), "To:", fill=INK, font=body)
+    _hline(draw, left + 50, right, y + 18, 1)
+    draw.text((left + 60, y - 2), (to_location or "")[:70], fill=FILL_BLUE, font=fill_f)
 
-    # Miles boxes
-    draw.text((_s(95), _s(100)), str(totals["miles"]), fill=ink, font=font_lg)
-    draw.text((_s(95), _s(122)), str(totals["miles"]), fill=ink, font=font_lg)
+    y += 50
+    # Miles + vehicle + carrier block
+    box_h = 70
+    miles_w = 210
+    _box(draw, (left, y, left + miles_w, y + box_h))
+    _box(draw, (left + miles_w, y, left + miles_w * 2, y + box_h))
+    draw.text((left + 10, y + 6), "Total Miles Driving Today", fill=INK, font=tiny)
+    draw.text((left + miles_w + 10, y + 6), "Total Mileage Today", fill=INK, font=tiny)
+    draw.text((left + 70, y + 28), str(totals["miles"]), fill=FILL_BLUE, font=_font(28, bold=True))
+    draw.text(
+        (left + miles_w + 70, y + 28),
+        str(totals["miles"]),
+        fill=FILL_BLUE,
+        font=_font(28, bold=True),
+    )
 
-    # Carrier / vehicle placeholders (assessment-friendly)
-    draw.text((_s(210), _s(95)), "Trip Planner Carrier", fill=ink, font=font_sm)
-    draw.text((_s(210), _s(110)), "Main Office — Assessment MVP", fill=ink, font=font_sm)
-    draw.text((_s(210), _s(125)), "Home Terminal — Local", fill=ink, font=font_sm)
-    draw.text((_s(390), _s(108)), "TRUCK-01", fill=ink, font=font_md)
+    veh_top = y + box_h
+    veh_h = 90
+    _box(draw, (left, veh_top, left + miles_w * 2, veh_top + veh_h))
+    draw.text(
+        (left + 10, veh_top + 8),
+        "Truck/Tractor and Trailer Numbers or License Plate(s)/State (show each unit)",
+        fill=INK,
+        font=tiny,
+    )
+    draw.text((left + 20, veh_top + 40), "TRUCK-01", fill=FILL_BLUE, font=fill_f)
 
-    # --- Duty graph lines ---
+    carrier_x = left + miles_w * 2 + 24
+    cy = y + 8
+    for label, value in (
+        ("Name of Carrier or Carriers", "Trip Planner Carrier"),
+        ("Main Office Address", "Assessment MVP — Main Office"),
+        ("Home Terminal Address", "Home Terminal — Local"),
+    ):
+        draw.text((carrier_x, cy), label, fill=LIGHT, font=tiny)
+        _hline(draw, carrier_x, right, cy + 34, 1)
+        draw.text((carrier_x, cy + 12), value, fill=FILL_BLUE, font=body)
+        cy += 52
+
+    y = veh_top + veh_h + 28
+
+    # --- Duty status grid ---
+    label_w = 210
+    total_w = 110
+    graph_left = left + label_w
+    graph_right = right - total_w
+    graph_width = graph_right - graph_left
+    row_h = 78
+    header_h = 42
+    graph_top = y + header_h
+    graph_bottom = graph_top + row_h * 4
+
+    # Hour header bar
+    draw.rectangle([graph_left, y, graph_right, graph_top], fill=HEADER_BG)
+    hour_labels = (
+        ["Mid\nnight"]
+        + [str(i) for i in range(1, 12)]
+        + ["Noon"]
+        + [str(i) for i in range(1, 12)]
+        + ["Mid\nnight"]
+    )
+    # 25 labels for 24 hour boundaries (0..24)
+    for i, label in enumerate(hour_labels):
+        x = graph_left + int(i / 24 * graph_width)
+        # center label in hour cell for 0-23, last at end
+        if i < 24:
+            cx = graph_left + int((i + 0.5) / 24 * graph_width)
+        else:
+            cx = graph_right - 8
+        # Use condensed labels on the black bar
+        if i == 0:
+            draw.text((graph_left + 4, y + 6), "Mid-night", fill=WHITE, font=tiny)
+        elif i == 12:
+            draw.text((cx - 16, y + 12), "Noon", fill=WHITE, font=tiny)
+        elif i == 24:
+            draw.text((graph_right - 58, y + 6), "Mid-night", fill=WHITE, font=tiny)
+        elif i < 24:
+            draw.text((cx - 4, y + 12), str(i if i <= 12 else i - 12), fill=WHITE, font=tiny)
+
+    draw.text((graph_right + 12, y + 12), "Total\nHours", fill=INK, font=small)
+
+    # Grid body
+    _box(draw, (left, graph_top, right, graph_bottom), 2)
+    draw.line([(graph_left, graph_top), (graph_left, graph_bottom)], fill=INK, width=2)
+    draw.line([(graph_right, graph_top), (graph_right, graph_bottom)], fill=INK, width=2)
+
+    for i, (key, label) in enumerate(STATUS_ORDER):
+        top = graph_top + i * row_h
+        mid = top + row_h // 2
+        if i > 0:
+            _hline(draw, left, right, top, 1)
+        draw.text((left + 10, mid - 8), label, fill=INK, font=small)
+        # midline guide for drawing
+        draw.line([(graph_left, mid), (graph_right, mid)], fill=(210, 210, 210), width=1)
+
+    # Vertical hour + quarter-hour ticks
+    for h in range(25):
+        x = graph_left + int(h / 24 * graph_width)
+        width = 2 if h % 6 == 0 else 1
+        draw.line([(x, graph_top), (x, graph_bottom)], fill=GRID if h % 6 == 0 else (180, 180, 180), width=width)
+        if h < 24:
+            for q in (1, 2, 3):
+                qx = graph_left + int((h + q / 4) / 24 * graph_width)
+                # short ticks at each row midline area
+                for r in range(4):
+                    ry = graph_top + r * row_h + row_h // 2
+                    draw.line([(qx, ry - 8), (qx, ry + 8)], fill=(190, 190, 190), width=1)
+
+    def hour_x(hour: float) -> int:
+        return graph_left + int(max(0.0, min(24.0, hour)) / 24 * graph_width)
+
+    def row_mid(status: str) -> int:
+        idx = next(i for i, (k, _) in enumerate(STATUS_ORDER) if k == status)
+        return graph_top + idx * row_h + row_h // 2
+
+    # Draw duty lines
     sorted_segs = sorted(segments, key=lambda s: s[0])
     last_end = 0.0
     last_status = "off_duty"
-    line_w = max(3, SCALE)
+    line_w = 5
 
     def draw_status_line(start_h: float, end_h: float, status: str) -> None:
-        if end_h <= start_h:
+        if end_h <= start_h + 1e-6:
             return
-        y = _s(_row_y(status))
-        x1 = _s(_hour_x(start_h))
-        x2 = _s(_hour_x(end_h))
-        draw.line([(x1, y), (x2, y)], fill=ink_dark, width=line_w)
-        r = max(2, SCALE)
-        draw.ellipse([x1 - r, y - r, x1 + r, y + r], fill=ink_dark)
-        draw.ellipse([x2 - r, y - r, x2 + r, y + r], fill=ink_dark)
+        y_line = row_mid(status)
+        x1, x2 = hour_x(start_h), hour_x(end_h)
+        draw.line([(x1, y_line), (x2, y_line)], fill=INK, width=line_w)
+        r = 4
+        draw.ellipse([x1 - r, y_line - r, x1 + r, y_line + r], fill=INK)
+        draw.ellipse([x2 - r, y_line - r, x2 + r, y_line + r], fill=INK)
 
     def draw_connector(at_h: float, from_status: str, to_status: str) -> None:
         if from_status == to_status:
             return
-        x = _s(_hour_x(at_h))
-        y1 = _s(_row_y(from_status))
-        y2 = _s(_row_y(to_status))
-        draw.line([(x, y1), (x, y2)], fill=ink_dark, width=max(2, SCALE - 1))
+        x = hour_x(at_h)
+        draw.line(
+            [(x, row_mid(from_status)), (x, row_mid(to_status))],
+            fill=INK,
+            width=3,
+        )
 
     for start_h, end_h, status in sorted_segs:
         if start_h > last_end + 0.01:
@@ -246,36 +370,107 @@ def draw_log_sheet(
         draw_connector(last_end, last_status, "off_duty")
         draw_status_line(last_end, 24, "off_duty")
 
-    # --- Total hours column (right of grid) ---
-    total_x = _s(455)
-    for status, key in (
-        ("off_duty", "off_duty"),
-        ("sleeper", "sleeper"),
-        ("driving", "driving"),
-        ("on_duty", "on_duty"),
-    ):
-        y = _s(_row_y(status) - 4)
-        draw.text((total_x, y), f"{totals[key]:.1f}", fill=ink, font=font_sm)
+    # Total hours column values
+    for i, (key, _) in enumerate(STATUS_ORDER):
+        mid = graph_top + i * row_h + row_h // 2
+        draw.text(
+            (graph_right + 28, mid - 10),
+            f"{totals[key]:.1f}",
+            fill=FILL_BLUE,
+            font=fill_f,
+        )
+
+    y = graph_bottom + 24
 
     # --- Remarks ---
-    ry = _s(268)
-    rx = _s(40)
-    for line in remarks:
-        draw.text((rx, ry), line[:70], fill=ink, font=font_sm)
-        ry += _s(11)
-        if ry > _s(360):
-            break
+    remarks_h = 320
+    _box(draw, (left, y, right, y + remarks_h), 2)
+    draw.text((left + 12, y + 10), "Remarks", fill=INK, font=h1)
+    ry = y + 42
+    if not remarks:
+        draw.text((left + 16, ry), "No special remarks for this day.", fill=LIGHT, font=body)
+    else:
+        for line in remarks:
+            draw.text((left + 16, ry), line[:95], fill=FILL_BLUE, font=body)
+            ry += 22
+            if ry > y + remarks_h - 90:
+                break
 
-    draw.text((_s(300), _s(300)), "Shipper & Commodity: General Freight", fill=ink, font=font_sm)
-    draw.text((_s(300), _s(315)), f"Day {day} log sheet", fill=ink, font=font_sm)
+    # Shipping docs inside remarks box bottom
+    ship_y = y + remarks_h - 70
+    _hline(draw, left, right, ship_y, 1)
+    draw.text((left + 12, ship_y + 8), "Shipping Documents:", fill=INK, font=small)
+    draw.text((left + 200, ship_y + 8), "DVL or Manifest No. or", fill=LIGHT, font=tiny)
+    _hline(draw, left + 380, right - 20, ship_y + 24, 1)
+    draw.text((left + 12, ship_y + 36), "Shipper & Commodity", fill=INK, font=small)
+    draw.text((left + 200, ship_y + 34), "General Freight", fill=FILL_BLUE, font=body)
 
-    # --- Recap (70 hour / 8 day) ---
-    # A ≈ cycle used today snapshot, B ≈ remaining
-    draw.text((_s(175), _s(430)), f"{cycle_used:.1f}", fill=ink, font=font_md)
-    draw.text((_s(175), _s(455)), f"{max(0.0, cycle_remaining):.1f}", fill=ink, font=font_md)
-    draw.text((_s(175), _s(480)), f"{cycle_used:.1f}", fill=ink, font=font_md)
+    y = y + remarks_h + 12
+    draw.text(
+        (left, y),
+        "Enter name of place you reported and where released from work and when and where each change of duty occurred. Use time standard of home terminal.",
+        fill=INK,
+        font=tiny,
+    )
 
-    return img.convert("RGB")
+    y += 36
+    # --- Recap ---
+    draw.text((left, y), "Recap: Complete at end of day", fill=INK, font=h1)
+    y += 28
+    draw.text(
+        (left, y),
+        f"On duty hours today, Total lines 3 & 4:  {totals['duty_hours']:.1f}",
+        fill=FILL_BLUE,
+        font=body,
+    )
+    y += 36
+
+    recap_top = y
+    recap_h = 220
+    _box(draw, (left, recap_top, right, recap_top + recap_h), 2)
+
+    # Left labels
+    draw.text((left + 12, recap_top + 20), "70 Hour / 8 Day Drivers", fill=INK, font=h1)
+    draw.text((left + 12, recap_top + 120), "60 Hour / 7 Day Drivers", fill=INK, font=h1)
+
+    # Columns A B C
+    col_w = 280
+    start_x = left + 320
+    headers = [
+        ("A", "Total hours on duty last\n7 days including today"),
+        ("B", "Total hours available\ntomorrow 70 hr. minus A*"),
+        ("C", "Total hours on duty last\n8 days including today"),
+    ]
+    values_70 = [f"{cycle_used:.1f}", f"{max(0.0, cycle_remaining):.1f}", f"{cycle_used:.1f}"]
+    values_60 = ["—", "—", "—"]
+
+    for i, ((letter, caption), val) in enumerate(zip(headers, values_70)):
+        cx = start_x + i * col_w
+        draw.line([(cx, recap_top), (cx, recap_top + recap_h)], fill=INK, width=1)
+        draw.text((cx + 12, recap_top + 8), letter, fill=INK, font=h1)
+        draw.text((cx + 40, recap_top + 10), caption, fill=LIGHT, font=tiny)
+        _box(draw, (cx + 40, recap_top + 55, cx + 160, recap_top + 95), 1)
+        draw.text((cx + 60, recap_top + 65), val, fill=FILL_BLUE, font=fill_f)
+        # 60-hr row placeholders
+        _box(draw, (cx + 40, recap_top + 150, cx + 160, recap_top + 190), 1)
+        draw.text((cx + 70, recap_top + 160), values_60[i], fill=LIGHT, font=body)
+
+    draw.text(
+        (right - 320, recap_top + recap_h - 28),
+        "*If you took 34 consecutive hours off duty\nyou have 60/70 hours available.",
+        fill=INK,
+        font=tiny,
+    )
+
+    # Footer
+    draw.text(
+        (left, HEIGHT - MARGIN - 10),
+        f"Day {day}  ·  Generated by Trip Planner & ELD Log Generator  ·  Property-carrying 70hr/8day",
+        fill=LIGHT,
+        font=tiny,
+    )
+
+    return img
 
 
 def generate_log_images(
@@ -285,7 +480,7 @@ def generate_log_images(
     cycle_hours_used: float = 0.0,
     cycle_hours_remaining: float = 70.0,
 ) -> list[dict[str, str]]:
-    """Generate one PNG per day by drawing on the blank log template."""
+    """Generate one filled daily-log PNG per day using a drawn template."""
     media_logs = Path(settings.MEDIA_ROOT) / "logs"
     media_logs.mkdir(parents=True, exist_ok=True)
 
@@ -313,11 +508,6 @@ def generate_log_images(
             if start_dt < day_end and end_dt > day_start:
                 overlapping.append(e)
 
-        # Per-day from/to: start day uses current→pickup-ish; later days dropoff
-        day_from = from_location
-        day_to = to_location
-        if day == 1 and from_location:
-            day_from = from_location
         segments = _build_status_segments(overlapping, day_start)
         totals = _day_totals(events)
         remarks = _remarks(events)
@@ -328,15 +518,15 @@ def generate_log_images(
             segments=segments,
             totals=totals,
             remarks=remarks,
-            from_location=day_from,
-            to_location=day_to,
+            from_location=from_location,
+            to_location=to_location,
             cycle_used=cycle_hours_used,
             cycle_remaining=cycle_hours_remaining,
         )
 
         filename = f"log_{trip_id}_day{day}.png"
         path = media_logs / filename
-        img.save(path, "PNG")
+        img.save(path, "PNG", optimize=True)
 
         url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/media/logs/{filename}"
         results.append(
