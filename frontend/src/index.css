@@ -58,6 +58,25 @@ body {
   animation: shimmer 1.5s infinite;
 }
 
+@keyframes progress-shine {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+.progress-bar-fill {
+  background-size: 200% 100%;
+  animation: progress-shine 1.4s linear infinite;
+}
+
+@keyframes preloader-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+.preloader-logo {
+  animation: preloader-pulse 1.6s ease-in-out infinite;
+}
+
 /* Subtle scrollbar for schedule */
 .custom-scroll::-webkit-scrollbar {
   width: 6px;

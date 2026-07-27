@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
@@ -26,6 +26,14 @@ const STOP_META = {
   rest: { color: '#7c3aed', label: 'Rest' },
 }
 
+const LOADING_STEPS = [
+  { at: 0, label: 'Geocoding locations…' },
+  { at: 22, label: 'Calculating route…' },
+  { at: 48, label: 'Building HOS schedule…' },
+  { at: 72, label: 'Generating driver logs…' },
+  { at: 90, label: 'Finalizing trip…' },
+]
+
 function coloredIcon(color, size = 14) {
   return L.divIcon({
     className: '',
@@ -48,7 +56,67 @@ function FitBounds({ positions }) {
   return null
 }
 
-export default function RouteMap({ route, locations, mapStops }) {
+function MapLoadingProgress() {
+  const [progress, setProgress] = useState(6)
+
+  useEffect(() => {
+    const started = Date.now()
+    const id = setInterval(() => {
+      const elapsed = Date.now() - started
+      // Ease toward ~92% while waiting; never hit 100 until result arrives
+      const target = Math.min(92, 8 + elapsed / 180)
+      setProgress((prev) => {
+        const next = prev + (target - prev) * 0.12
+        return Math.min(92, Math.max(prev, next))
+      })
+    }, 120)
+    return () => clearInterval(id)
+  }, [])
+
+  const stepLabel = [...LOADING_STEPS].reverse().find((s) => progress >= s.at)?.label
+    || LOADING_STEPS[0].label
+
+  return (
+    <div className="flex h-80 flex-col items-center justify-center gap-6 rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 via-white to-slate-50 px-8 md:h-[460px]">
+      <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-lg shadow-brand-500/30">
+        <IconMap className="h-7 w-7" />
+      </div>
+
+      <div className="w-full max-w-md space-y-3 text-center">
+        <div>
+          <p className="text-base font-semibold text-slate-900">Generating your trip</p>
+          <p className="mt-1 text-sm text-brand-700">{stepLabel}</p>
+        </div>
+
+        <div className="relative h-3 overflow-hidden rounded-full bg-slate-200/80 ring-1 ring-slate-200">
+          <div
+            className="progress-bar-fill absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-brand-500 via-brand-600 to-indigo-500 transition-[width] duration-300 ease-out"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+
+        <div className="flex items-center justify-between text-xs text-slate-500">
+          <span>Route · Schedule · ELD logs</span>
+          <span className="font-semibold tabular-nums text-brand-700">{Math.round(progress)}%</span>
+        </div>
+
+        <div className="flex justify-center gap-2 pt-1">
+          {LOADING_STEPS.map((s, i) => (
+            <span
+              key={s.label}
+              className={`h-1.5 w-8 rounded-full transition-colors ${
+                progress >= s.at ? 'bg-brand-500' : 'bg-slate-200'
+              }`}
+              title={s.label}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default function RouteMap({ route, locations, mapStops, loading = false }) {
   const positions = useMemo(() => route?.geometry?.coordinates || [], [route])
   const center = positions[0] || [39.8283, -98.5795]
 
@@ -64,6 +132,10 @@ export default function RouteMap({ route, locations, mapStops }) {
     const skip = new Set(['start', 'end', 'arrive_pickup', 'arrive_dropoff', 'pickup', 'dropoff'])
     return (mapStops || []).filter((s) => !skip.has(s.type))
   }, [mapStops])
+
+  if (loading) {
+    return <MapLoadingProgress />
+  }
 
   if (!positions.length) {
     return (

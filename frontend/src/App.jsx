@@ -1,9 +1,11 @@
+import { useCallback, useState } from 'react'
 import TripForm from './components/TripForm'
 import RouteMap from './components/RouteMap'
 import TripSummary from './components/TripSummary'
 import ScheduleTable from './components/ScheduleTable'
 import DriverLogs from './components/DriverLogs'
 import ErrorAlert from './components/ErrorAlert'
+import Preloader from './components/Preloader'
 import { Card, CardHeader } from './components/ui/Card'
 import { useTripPlanner } from './hooks/useTripPlanner'
 import {
@@ -24,30 +26,6 @@ const HOS_RULES = [
   { icon: '📦', text: '1h pickup + 1h dropoff' },
   { icon: '📊', text: '70h / 8-day cycle' },
 ]
-
-function LoadingSkeleton() {
-  return (
-    <div className="space-y-6 animate-fade-up">
-      <div className="rounded-2xl bg-white p-6 ring-1 ring-slate-200">
-        <div className="skeleton mb-4 h-6 w-48 rounded-lg" />
-        <div className="skeleton h-64 rounded-xl" />
-      </div>
-      <div className="grid grid-cols-3 gap-3">
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="skeleton h-24 rounded-2xl" />
-        ))}
-      </div>
-      <div className="rounded-2xl bg-white p-6 ring-1 ring-slate-200">
-        <div className="skeleton mb-4 h-6 w-32 rounded-lg" />
-        <div className="space-y-3">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="skeleton h-16 rounded-xl" />
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 function EmptyState() {
   return (
@@ -76,9 +54,13 @@ function EmptyState() {
 
 export default function App() {
   const { form, updateField, fillSample, submit, result, loading, error } = useTripPlanner()
+  const [booting, setBooting] = useState(true)
+  const finishBoot = useCallback(() => setBooting(false), [])
 
   return (
     <div className="relative min-h-screen">
+      {booting && <Preloader onDone={finishBoot} />}
+
       {/* Background */}
       <div className="pointer-events-none fixed inset-0 -z-10">
         <div className="absolute inset-0 bg-[linear-gradient(160deg,#f8fafc_0%,#eef2ff_40%,#f1f5f9_100%)]" />
@@ -86,7 +68,11 @@ export default function App() {
         <div className="absolute -right-32 top-1/3 h-80 w-80 rounded-full bg-indigo-200/25 blur-3xl" />
       </div>
 
-      <div className="relative w-full px-4 py-6 sm:px-6 lg:px-8 lg:py-10">
+      <div
+        className={`relative w-full px-4 py-6 sm:px-6 lg:px-8 lg:py-10 transition-opacity duration-500 ${
+          booting ? 'opacity-0' : 'opacity-100'
+        }`}
+      >
         {/* Header */}
         <header className="mb-8 animate-fade-up">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
@@ -188,11 +174,10 @@ export default function App() {
                   route={result?.route}
                   locations={result?.locations}
                   mapStops={result?.map_stops}
+                  loading={loading}
                 />
               </div>
             </Card>
-
-            {loading && <LoadingSkeleton />}
 
             {result && !loading && (
               <div className="space-y-6 animate-fade-up">
