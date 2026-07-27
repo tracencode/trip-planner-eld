@@ -1,8 +1,13 @@
 """
-Generate FMCSA-style daily driver log sheet PNGs.
+Generate daily driver log sheets by drawing on the blank FMCSA-style form.
 
-Draws Off Duty / Sleeper / Driving / On Duty graph lines and fills
-totals (miles, driving hours, duty hours) plus remarks.
+Uses trips/assets/blank_log.png as the template and overlays:
+- date / from / to
+- total miles
+- duty-status graph lines (Off Duty / Sleeper / Driving / On Duty)
+- total hours per status
+- remarks
+- simple 70hr/8day recap values
 """
 from __future__ import annotations
 
@@ -16,27 +21,37 @@ from django.conf import settings
 from PIL import Image, ImageDraw, ImageFont
 
 
-WIDTH = 1400
-HEIGHT = 900
-MARGIN_LEFT = 160
-MARGIN_RIGHT = 50
-GRAPH_TOP = 220
-ROW_HEIGHT = 70
+# --- Template geometry (base blank is 513×518; we scale up for clarity) ---
+BLANK_PATH = Path(__file__).resolve().parent.parent / "assets" / "blank_log.png"
+SCALE = 3
+
+# Coordinates are in *base* (1×) pixels; multiplied by SCALE when drawing.
+GRAPH_LEFT = 97.0
+GRAPH_RIGHT = 445.0
 HOURS = 24
 
-STATUSES = [
-    ("off_duty", "1. Off Duty", 0),
-    ("sleeper", "2. Sleeper Berth", 1),
-    ("driving", "3. Driving", 2),
-    ("on_duty", "4. On Duty (Not Driving)", 3),
-]
+# Horizontal separators of the 4 duty rows (from calibration)
+ROW_BOUNDS = [184.0, 201.0, 218.0, 235.0, 252.0]
+STATUS_ROWS = {
+    "off_duty": 0,
+    "sleeper": 1,
+    "driving": 2,
+    "on_duty": 3,
+}
+
+
+def _s(v: float) -> int:
+    return int(round(v * SCALE))
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    size = max(10, int(size * SCALE / 2.2))
     for name in (
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        "/System/Library/Fonts/Courier.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ):
         try:
             return ImageFont.truetype(name, size)
@@ -46,12 +61,12 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 def _hour_x(hour: float) -> float:
-    graph_width = WIDTH - MARGIN_LEFT - MARGIN_RIGHT
-    return MARGIN_LEFT + (hour / HOURS) * graph_width
+    return GRAPH_LEFT + (hour / HOURS) * (GRAPH_RIGHT - GRAPH_LEFT)
 
 
-def _status_y(row: int) -> float:
-    return GRAPH_TOP + row * ROW_HEIGHT + ROW_HEIGHT / 2
+def _row_y(status: str) -> float:
+    idx = STATUS_ROWS.get(status, 0)
+    return (ROW_BOUNDS[idx] + ROW_BOUNDS[idx + 1]) / 2.0
 
 
 def _parse_events_by_day(schedule: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
@@ -84,13 +99,6 @@ def _build_status_segments(
         seg_start = max(start_dt, day_start)
         seg_end = min(end_dt, day_end)
         if seg_end <= seg_start:
-            # Event may span into next calendar day — clip portion on this day
-            if start_dt < day_end and end_dt > day_start:
-                seg_start = max(start_dt, day_start)
-                seg_end = min(end_dt, day_end)
-            else:
-                continue
-        if seg_end <= seg_start:
             continue
 
         start_h = (seg_start - day_start).total_seconds() / 3600
@@ -102,34 +110,55 @@ def _build_status_segments(
 
 def _day_totals(day_events: list[dict[str, Any]]) -> dict[str, float]:
     miles = 0.0
-    driving = 0.0
-    duty = 0.0
-    off_duty = 0.0
+    hours = {"off_duty": 0.0, "sleeper": 0.0, "driving": 0.0, "on_duty": 0.0}
     for e in day_events:
         miles += float(e.get("miles") or 0)
         dur = float(e.get("duration_hours") or 0)
         status = e.get("status")
-        if status == "driving":
-            driving += dur
-            duty += dur
-        elif status == "on_duty":
-            duty += dur
-        elif status == "off_duty":
-            off_duty += dur
+        if status in hours:
+            hours[status] += dur
+    # Remaining time in the calendar day is off-duty for the sheet total
+    accounted = sum(hours.values())
+    if accounted < 24:
+        hours["off_duty"] += 24 - accounted
     return {
         "miles": round(miles, 1),
-        "driving_hours": round(driving, 2),
-        "duty_hours": round(duty, 2),
-        "off_duty_hours": round(off_duty, 2),
+        "off_duty": round(hours["off_duty"], 2),
+        "sleeper": round(hours["sleeper"], 2),
+        "driving": round(hours["driving"], 2),
+        "on_duty": round(hours["on_duty"], 2),
+        "duty_hours": round(hours["driving"] + hours["on_duty"], 2),
     }
 
 
 def _remarks(day_events: list[dict[str, Any]]) -> list[str]:
-    lines = []
+    lines: list[str] = []
     for e in day_events:
-        if e["type"] in ("break", "rest", "fuel", "pickup", "dropoff", "cycle_warning"):
-            lines.append(f"{e['time']} — {e['description']}")
-    return lines[:8]
+        if e["type"] in (
+            "start",
+            "break",
+            "rest",
+            "fuel",
+            "pickup",
+            "dropoff",
+            "arrive_pickup",
+            "arrive_dropoff",
+            "cycle_warning",
+            "end",
+        ):
+            lines.append(f"{e['time']} {e['description']}")
+    return lines[:10]
+
+
+def _load_blank() -> Image.Image:
+    if not BLANK_PATH.exists():
+        raise FileNotFoundError(f"Blank log template missing: {BLANK_PATH}")
+    base = Image.open(BLANK_PATH).convert("RGBA")
+    # Upscale for sharper handwriting-style overlays
+    return base.resize(
+        (base.width * SCALE, base.height * SCALE),
+        Image.Resampling.LANCZOS,
+    )
 
 
 def draw_log_sheet(
@@ -138,182 +167,131 @@ def draw_log_sheet(
     segments: list[tuple[float, float, str]],
     totals: dict[str, float],
     remarks: list[str],
+    from_location: str = "",
+    to_location: str = "",
+    cycle_used: float = 0.0,
+    cycle_remaining: float = 70.0,
 ) -> Image.Image:
-    img = Image.new("RGB", (WIDTH, HEIGHT), "#fafafa")
+    img = _load_blank()
     draw = ImageDraw.Draw(img)
-    title_font = _font(26)
-    label_font = _font(15)
-    small_font = _font(12)
-    tiny_font = _font(11)
 
-    # Outer border (form look)
-    draw.rectangle([20, 20, WIDTH - 20, HEIGHT - 20], outline="#1e293b", width=2)
+    ink = (15, 40, 120)  # blue pen look
+    ink_dark = (20, 20, 20)
+    font_sm = _font(11)
+    font_md = _font(13)
+    font_lg = _font(15)
 
-    # Header
-    draw.text((40, 36), "Drivers Daily Log", fill="#0f172a", font=title_font)
-    draw.text(
-        (40, 72),
-        "(24 hours)  —  Property-Carrying  —  70 hr / 8 day",
-        fill="#475569",
-        font=small_font,
-    )
+    # --- Header fields ---
+    try:
+        dt = datetime.strptime(day_date, "%Y-%m-%d")
+        month, day_n, year = f"{dt.month:02d}", f"{dt.day:02d}", str(dt.year)
+    except ValueError:
+        month, day_n, year = "", "", day_date
 
-    # Form fields row
-    y = 100
-    fields = [
-        (40, "Date", day_date),
-        (280, "Day #", str(day)),
-        (400, "Total Miles Driving Today", str(totals["miles"])),
-        (720, "Shipping Docs", "N/A"),
-        (980, "Vehicle IDs", "TRUCK-01"),
-    ]
-    for x, label, value in fields:
-        draw.text((x, y), label, fill="#64748b", font=tiny_font)
-        draw.line([(x, y + 36), (x + 200, y + 36)], fill="#94a3b8", width=1)
-        draw.text((x, y + 18), value, fill="#0f172a", font=label_font)
+    # Date: month / day / year (top right area of form)
+    draw.text((_s(268), _s(36)), month, fill=ink, font=font_md)
+    draw.text((_s(312), _s(36)), day_n, fill=ink, font=font_md)
+    draw.text((_s(350), _s(36)), year, fill=ink, font=font_md)
 
-    # Totals boxes
-    box_y = 155
-    boxes = [
-        ("Off Duty", f"{totals['off_duty_hours']} h"),
-        ("Driving", f"{totals['driving_hours']} h"),
-        ("On Duty", f"{totals['duty_hours']} h"),
-        ("Total Duty", f"{totals['duty_hours']} h"),
-    ]
-    bx = 40
-    for label, value in boxes:
-        draw.rectangle([bx, box_y, bx + 150, box_y + 44], outline="#94a3b8", width=1)
-        draw.text((bx + 10, box_y + 4), label, fill="#64748b", font=tiny_font)
-        draw.text((bx + 10, box_y + 20), value, fill="#1e40af", font=label_font)
-        bx += 165
+    # From / To
+    draw.text((_s(55), _s(58)), (from_location or "")[:42], fill=ink, font=font_sm)
+    draw.text((_s(55), _s(74)), (to_location or "")[:42], fill=ink, font=font_sm)
 
-    graph_bottom = GRAPH_TOP + len(STATUSES) * ROW_HEIGHT
-    graph_right = WIDTH - MARGIN_RIGHT
+    # Miles boxes
+    draw.text((_s(95), _s(100)), str(totals["miles"]), fill=ink, font=font_lg)
+    draw.text((_s(95), _s(122)), str(totals["miles"]), fill=ink, font=font_lg)
 
-    draw.rectangle(
-        [MARGIN_LEFT, GRAPH_TOP, graph_right, graph_bottom],
-        outline="#334155",
-        width=2,
-        fill="white",
-    )
+    # Carrier / vehicle placeholders (assessment-friendly)
+    draw.text((_s(210), _s(95)), "Trip Planner Carrier", fill=ink, font=font_sm)
+    draw.text((_s(210), _s(110)), "Main Office — Assessment MVP", fill=ink, font=font_sm)
+    draw.text((_s(210), _s(125)), "Home Terminal — Local", fill=ink, font=font_sm)
+    draw.text((_s(390), _s(108)), "TRUCK-01", fill=ink, font=font_md)
 
-    for name, label, row in STATUSES:
-        y_top = GRAPH_TOP + row * ROW_HEIGHT
-        y_mid = _status_y(row)
-        if row > 0:
-            draw.line([(MARGIN_LEFT, y_top), (graph_right, y_top)], fill="#94a3b8", width=1)
-        draw.text((28, y_mid - 8), label, fill="#1e293b", font=tiny_font)
-
-    # Hour grid + noon marker
-    for h in range(HOURS + 1):
-        x = _hour_x(h)
-        color = "#64748b" if h == 12 else "#cbd5e1"
-        width = 2 if h in (0, 12, 24) else 1
-        draw.line([(x, GRAPH_TOP), (x, graph_bottom)], fill=color, width=width)
-        if h % 1 == 0:
-            # quarter ticks mid-hour already covered by hour lines
-            pass
-        label = f"{h}" if h < 24 else "24"
-        if h % 2 == 0:
-            draw.text((x - 6, graph_bottom + 6), label, fill="#475569", font=tiny_font)
-
-    draw.text((_hour_x(12) - 18, graph_bottom + 24), "Noon", fill="#64748b", font=tiny_font)
-    draw.text((_hour_x(0) - 4, graph_bottom + 24), "Midnight", fill="#64748b", font=tiny_font)
-
-    status_map = {s[0]: s[2] for s in STATUSES}
-    colors = {
-        "off_duty": "#475569",
-        "sleeper": "#7c3aed",
-        "driving": "#1d4ed8",
-        "on_duty": "#c2410c",
-    }
-
-    last_end = 0.0
-    last_row = 0
+    # --- Duty graph lines ---
     sorted_segs = sorted(segments, key=lambda s: s[0])
+    last_end = 0.0
+    last_status = "off_duty"
+    line_w = max(3, SCALE)
 
-    def draw_line_seg(start_h: float, end_h: float, status: str) -> int:
-        row = status_map.get(status, 0)
-        y = _status_y(row)
-        x1 = _hour_x(start_h)
-        x2 = _hour_x(end_h)
-        color = colors.get(status, "#334155")
-        draw.line([(x1, y), (x2, y)], fill=color, width=5)
-        draw.ellipse([x1 - 3, y - 3, x1 + 3, y + 3], fill=color)
-        draw.ellipse([x2 - 3, y - 3, x2 + 3, y + 3], fill=color)
-        return row
+    def draw_status_line(start_h: float, end_h: float, status: str) -> None:
+        if end_h <= start_h:
+            return
+        y = _s(_row_y(status))
+        x1 = _s(_hour_x(start_h))
+        x2 = _s(_hour_x(end_h))
+        draw.line([(x1, y), (x2, y)], fill=ink_dark, width=line_w)
+        r = max(2, SCALE)
+        draw.ellipse([x1 - r, y - r, x1 + r, y + r], fill=ink_dark)
+        draw.ellipse([x2 - r, y - r, x2 + r, y + r], fill=ink_dark)
+
+    def draw_connector(at_h: float, from_status: str, to_status: str) -> None:
+        if from_status == to_status:
+            return
+        x = _s(_hour_x(at_h))
+        y1 = _s(_row_y(from_status))
+        y2 = _s(_row_y(to_status))
+        draw.line([(x, y1), (x, y2)], fill=ink_dark, width=max(2, SCALE - 1))
 
     for start_h, end_h, status in sorted_segs:
         if start_h > last_end + 0.01:
-            # vertical connector + off duty gap
-            new_row = draw_line_seg(last_end, start_h, "off_duty")
-            if new_row != last_row:
-                x = _hour_x(last_end)
-                draw.line(
-                    [(x, _status_y(last_row)), (x, _status_y(new_row))],
-                    fill="#475569",
-                    width=2,
-                )
-            last_row = new_row
-        # connector into this segment
-        row = status_map.get(status, 0)
-        if row != last_row:
-            x = _hour_x(start_h)
-            draw.line(
-                [(x, _status_y(last_row)), (x, _status_y(row))],
-                fill=colors.get(status, "#334155"),
-                width=2,
-            )
-        last_row = draw_line_seg(start_h, end_h, status)
+            draw_status_line(last_end, start_h, "off_duty")
+            draw_connector(last_end, last_status, "off_duty")
+            last_status = "off_duty"
+        draw_connector(start_h, last_status, status)
+        draw_status_line(start_h, end_h, status)
+        last_status = status
         last_end = end_h
 
     if last_end < 24:
-        row = draw_line_seg(last_end, 24, "off_duty")
-        if row != last_row:
-            x = _hour_x(last_end)
-            draw.line(
-                [(x, _status_y(last_row)), (x, _status_y(row))],
-                fill="#475569",
-                width=2,
-            )
+        draw_connector(last_end, last_status, "off_duty")
+        draw_status_line(last_end, 24, "off_duty")
 
-    # Remarks section
-    remarks_top = graph_bottom + 55
-    draw.text((40, remarks_top), "Remarks", fill="#0f172a", font=label_font)
-    draw.rectangle(
-        [40, remarks_top + 24, WIDTH - 40, HEIGHT - 50],
-        outline="#94a3b8",
-        width=1,
-        fill="white",
-    )
-    ry = remarks_top + 34
-    if not remarks:
-        draw.text((50, ry), "No special remarks.", fill="#94a3b8", font=small_font)
-    else:
-        for line in remarks:
-            draw.text((50, ry), line, fill="#334155", font=small_font)
-            ry += 18
+    # --- Total hours column (right of grid) ---
+    total_x = _s(455)
+    for status, key in (
+        ("off_duty", "off_duty"),
+        ("sleeper", "sleeper"),
+        ("driving", "driving"),
+        ("on_duty", "on_duty"),
+    ):
+        y = _s(_row_y(status) - 4)
+        draw.text((total_x, y), f"{totals[key]:.1f}", fill=ink, font=font_sm)
 
-    draw.text(
-        (WIDTH - 360, HEIGHT - 42),
-        "Generated by Trip Planner & ELD Log Generator",
-        fill="#94a3b8",
-        font=tiny_font,
-    )
+    # --- Remarks ---
+    ry = _s(268)
+    rx = _s(40)
+    for line in remarks:
+        draw.text((rx, ry), line[:70], fill=ink, font=font_sm)
+        ry += _s(11)
+        if ry > _s(360):
+            break
 
-    return img
+    draw.text((_s(300), _s(300)), "Shipper & Commodity: General Freight", fill=ink, font=font_sm)
+    draw.text((_s(300), _s(315)), f"Day {day} log sheet", fill=ink, font=font_sm)
+
+    # --- Recap (70 hour / 8 day) ---
+    # A ≈ cycle used today snapshot, B ≈ remaining
+    draw.text((_s(175), _s(430)), f"{cycle_used:.1f}", fill=ink, font=font_md)
+    draw.text((_s(175), _s(455)), f"{max(0.0, cycle_remaining):.1f}", fill=ink, font=font_md)
+    draw.text((_s(175), _s(480)), f"{cycle_used:.1f}", fill=ink, font=font_md)
+
+    return img.convert("RGB")
 
 
-def generate_log_images(schedule: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Generate one PNG per day from the schedule."""
+def generate_log_images(
+    schedule: list[dict[str, Any]],
+    from_location: str = "",
+    to_location: str = "",
+    cycle_hours_used: float = 0.0,
+    cycle_hours_remaining: float = 70.0,
+) -> list[dict[str, str]]:
+    """Generate one PNG per day by drawing on the blank log template."""
     media_logs = Path(settings.MEDIA_ROOT) / "logs"
     media_logs.mkdir(parents=True, exist_ok=True)
 
     by_day = _parse_events_by_day(schedule)
     results: list[dict[str, str]] = []
     trip_id = uuid.uuid4().hex[:10]
-
-    # Also attribute overnight rest segments that spill into next calendar day
     all_events = list(schedule)
 
     for day in sorted(by_day.keys()):
@@ -321,7 +299,6 @@ def generate_log_images(schedule: list[dict[str, Any]]) -> list[dict[str, str]]:
         day_date = events[0]["date"]
         day_start = datetime.strptime(day_date, "%Y-%m-%d")
 
-        # Include events from adjacent days that overlap this calendar day
         overlapping = []
         for e in all_events:
             dur = float(e.get("duration_hours") or 0)
@@ -336,10 +313,26 @@ def generate_log_images(schedule: list[dict[str, Any]]) -> list[dict[str, str]]:
             if start_dt < day_end and end_dt > day_start:
                 overlapping.append(e)
 
+        # Per-day from/to: start day uses current→pickup-ish; later days dropoff
+        day_from = from_location
+        day_to = to_location
+        if day == 1 and from_location:
+            day_from = from_location
         segments = _build_status_segments(overlapping, day_start)
         totals = _day_totals(events)
         remarks = _remarks(events)
-        img = draw_log_sheet(day, day_date, segments, totals, remarks)
+
+        img = draw_log_sheet(
+            day=day,
+            day_date=day_date,
+            segments=segments,
+            totals=totals,
+            remarks=remarks,
+            from_location=day_from,
+            to_location=day_to,
+            cycle_used=cycle_hours_used,
+            cycle_remaining=cycle_hours_remaining,
+        )
 
         filename = f"log_{trip_id}_day{day}.png"
         path = media_logs / filename

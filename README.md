@@ -18,7 +18,7 @@ A simple full-stack MVP that plans a trucking trip, applies basic Hours of Servi
   - Fuel stop every 1,000 miles
   - 1 hour pickup + 1 hour dropoff
   - 70-hour / 8-day cycle tracking
-- Daily FMCSA-style driver log sheet PNGs (graph + totals + remarks)
+- Daily FMCSA-style driver log sheet PNGs drawn on the official blank log form (graph + totals + remarks + recap)
 - Deployment-ready for **Render** (backend) and **Vercel** (frontend)
 
 ---

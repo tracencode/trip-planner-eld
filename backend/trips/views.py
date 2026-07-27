@@ -67,7 +67,16 @@ class PlanTripView(APIView):
         route = routing["route"]
         latlngs = route["geometry"]["coordinates"]
         map_stops = attach_stop_coordinates(schedule_result["schedule"], latlngs)
-        log_images = generate_log_images(schedule_result["schedule"])
+        locations = routing["locations"]
+        log_images = generate_log_images(
+            schedule_result["schedule"],
+            from_location=locations["current"].get("label")
+            or data["current_location"],
+            to_location=locations["dropoff"].get("label")
+            or data["dropoff_location"],
+            cycle_hours_used=schedule_result["summary"]["cycle_hours_used"],
+            cycle_hours_remaining=schedule_result["summary"]["cycle_hours_remaining"],
+        )
         summary = schedule_result["summary"]
 
         return Response(
