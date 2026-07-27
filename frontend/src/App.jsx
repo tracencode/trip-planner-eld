@@ -277,21 +277,6 @@ export default function App() {
                   </div>
                 )}
               </Card>
-
-              <Card className="animate-fade-up" style={{ animationDelay: '0.06s' }}>
-                <CardHeader icon={IconShield} title="Operational Notes" subtitle="Assessment-ready hints" />
-                <div className="space-y-2.5 text-sm text-slate-600">
-                  <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-                    Keep the map and schedule visible in Loom to show route + HOS logic together.
-                  </div>
-                  <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-                    Open one generated log image full-screen to demonstrate filled ELD sheets.
-                  </div>
-                  <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-                    Mention the simplified assumptions: no exceptions, fuel every 1,000 miles.
-                  </div>
-                </div>
-              </Card>
             </div>
           </aside>
         </div>
